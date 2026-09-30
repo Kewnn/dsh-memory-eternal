@@ -28,6 +28,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { ensureVault, search, generateDailyBrief } from './lib/vault.js'
 import { summarizeTurn, extractLastTurn, sliceNewEvents, resolveRoute, captureCard, captureUpdate, pickNeighbors } from './lib/capture.js'
 import { createApi, json } from './lib/api.js'
+import { resolveSettingsScope } from './lib/settings-scope.js'
 
 export const name = 'memory-eternal'
 // 声明本插件真正读取的服务：0.2.x 上 `ctx.get(name)` 只对已声明的服务生效，
@@ -97,7 +98,13 @@ const API_PREFIX = '/memory-eternal/api'
 const DSH_AGENT = 'deepseek-harness'
 
 export function apply(ctx, config) {
-  const settings = ctx.settings.register('memory-eternal', Config, { base: config ?? {} })
+  // 旧宿主（0.1.x）用 settings.register 注册配置段；0.2.0-rc.x 已移除该方法
+  // （配置改由 Loader 行的 Config schema 派生），无条件调用会抛
+  // TypeError: ctx.settings.register is not a function 并中断整个 fiber。
+  // 这里按宿主能力自适应，详细原因见 lib/settings-scope.js。
+  const settings = resolveSettingsScope(
+    ctx.settings, 'memory-eternal', Config, config, () => ctx.fiber?.config,
+  )
 
   const vaultDir = () => {
     const cfg = settings.get() ?? {}
