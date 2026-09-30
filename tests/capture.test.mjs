@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { ensureVault, listCards, readCard } from '../lib/vault.js'
-import { summarizeTurn, extractLastTurn, sliceNewEvents, parseCaptureJson, captureCard, captureUpdate, makeDedupChecker, pickNeighbors, DEDUP_THRESHOLD, compressExcerpt } from '../lib/capture.js'
+import { summarizeTurn, extractLastTurn, sliceNewEvents, parseCaptureJson, captureCard, captureUpdate, makeDedupChecker, pickNeighbors, DEDUP_THRESHOLD, compressExcerpt, resolveRoute } from '../lib/capture.js'
 
 const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-cap-'))
 const root = path.join(tmpRoot, 'vault')
@@ -192,4 +192,29 @@ test('makeDedupChecker scans a directory', async () => {
   const checker = makeDedupChecker(path.join(root, '03-Knowledge'))
   const hit = await checker(body, 0.62)
   assert.ok(hit)
+})
+
+test('resolveRoute takes the first live provider and its first model', async () => {
+  const llm = {
+    listProviders: () => [{ id: 'deepseek', name: 'DeepSeek' }],
+    listConfigurableProviders: () => [{ provider: 'gateway', displayName: 'Gateway' }],
+    listModels: async (provider) => (provider === 'deepseek' ? [{ id: 'deepseek-chat' }] : []),
+  }
+  assert.deepEqual(await resolveRoute(llm), { provider: 'deepseek', model: 'deepseek-chat' })
+})
+
+test('resolveRoute falls back to the configurable-provider directory', async () => {
+  // 这类宿主：用户配置之前 listProviders() 是空的，路由只出现在目录里。
+  const llm = {
+    listProviders: () => [],
+    listConfigurableProviders: () => [{ provider: 'gateway', displayName: 'Gateway' }],
+    listModels: async (provider) => (provider === 'gateway' ? [{ id: 'gpt-x' }] : []),
+  }
+  assert.deepEqual(await resolveRoute(llm), { provider: 'gateway', model: 'gpt-x' })
+})
+
+test('resolveRoute returns null instead of throwing when the llm surface is partial', async () => {
+  assert.equal(await resolveRoute({}), null)
+  assert.equal(await resolveRoute({ listProviders: () => [{ id: 'x' }], listModels: async () => { throw new Error('boom') } }), null)
+  assert.equal(await resolveRoute({ listProviders: () => 'not-an-array' }), null)
 })

@@ -52,6 +52,12 @@ export const Config = z.object({
   dedupByLLM: z.boolean().default(true),
   // 蒸馏单次输出上限（token），越高越准越贵
   captureMaxTokens: z.number().min(100).max(4000).default(900),
+  // 诊断：把自动沉淀每次跳过的原因打到宿主控制台（默认关，避免噪声）。
+  // 排查「库里一直没卡」时打开它——快速跳过会以 [memory-eternal] capture: 开头出现。
+  captureDebug: z.boolean().default(false),
+  // 兜底：解析不出模型路由（宿主只暴露可配置 provider 目录等）时，仍落一张原文卡，
+  // 而不是静默放弃。默认关，保持与原行为一致。
+  captureFallbackToRaw: z.boolean().default(false),
   // 召回相关性阈值（minScore），越高召回越少越精越省
   recallMinScore: z.number().min(0).max(50).default(2),
   // 注入体积可配置（召回）
@@ -175,17 +181,22 @@ export function apply(ctx, config) {
   }
 
   const runCapture = async (agent, events) => {
+    let debug = false
     try {
       const cfg = settings.get() ?? {}
+      debug = cfg.captureDebug === true
+      // 排查用：每次跳过都留下原因（captureDebug=false 时零输出）。
+      const dlog = (msg) => { if (debug) console.error(`[memory-eternal] capture: ${msg}`) }
       if (!cfg.enabled || !cfg.autoCapture) return
       const llm = ctx.get('llm')
       const text = extractLastTurn(events)
-      if (text.length < (cfg.captureMinChars ?? 200)) return
+      const minChars = cfg.captureMinChars ?? 200
+      if (text.length < minChars) { dlog(`skipped: turn text ${text.length} chars < captureMinChars ${minChars}`); return }
       // 日配额：防止一次大扫荡烧光 token。
-      if (!(await underDailyQuota(cfg.maxCardsPerDay))) return
-      // 成本控制：distillEnabled=false 时不调 LLM，直接存原文卡（零蒸馏成本）
+      if (!(await underDailyQuota(cfg.maxCardsPerDay))) { dlog('skipped: daily quota reached'); return }
       const source = DSH_AGENT
-      if (cfg.distillEnabled === false || !llm) {
+      // 成本控制：distillEnabled=false 时不调 LLM，直接存原文卡（零蒸馏成本）
+      const storeRaw = async (why) => {
         await captureCard(vaultDir(), {
           kind: 'content',
           title: text.replace(/\s+/g, ' ').slice(0, 40) || '未命名记录',
@@ -195,18 +206,27 @@ export function apply(ctx, config) {
           status: resolveAuditStatus(cfg, 'content', source || 'unknown'),
           submittedBy: source || 'unknown',
           severity: 'info',
-          reason: 'AI 自动沉淀（原文卡）',
+          reason: `AI 自动沉淀（原文卡·${why}）`,
         }, { threshold: cfg.dedupThreshold })
+        dlog(`stored raw card (${why})`)
+      }
+      if (cfg.distillEnabled === false || !llm) {
+        await storeRaw(cfg.distillEnabled === false ? 'distillEnabled=false' : 'no llm service')
         return
       }
       const route = await resolveRoute(llm)
-      if (!route) return
+      if (!route) {
+        // 解析不出路由时旧行为是静默 return：库里永远没卡、控制台也没线索。
+        if (cfg.captureFallbackToRaw) { await storeRaw('no llm route'); return }
+        dlog('skipped: no llm route (listProviders/listConfigurableProviders empty) - set captureFallbackToRaw=true to store raw cards anyway')
+        return
+      }
       // 语义去重近邻：把已有卡片索引喂给模型，让模型决定新建 vs 追加。
       // 成本控制：dedupByLLM=false 时跳过喂 LLM 的近邻采样（纯词法去重兜底）。
       const draft = { title: '', body: text.slice(0, 400) }
       const neighbors = cfg.dedupByLLM === false ? [] : await pickNeighbors(vaultDir(), draft, 8)
       const result = await summarizeTurn(llm, route, text, { signal: AbortSignal.timeout(45000), existing: neighbors, maxTokens: cfg.captureMaxTokens ?? 900 })
-      if (!result || result.save !== true) return
+      if (!result || result.save !== true) { dlog(`model declined to save (${result ? 'save!==true' : 'no result'})`); return }
       if (result.append_to) {
         // 模型判定属于已有卡 → 追加更新记录，不新建（boujoy 语义）。
         await captureUpdate(vaultDir(), result.append_to, result.update, { threshold: cfg.dedupThreshold })
