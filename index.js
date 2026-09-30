@@ -30,7 +30,10 @@ import { summarizeTurn, extractLastTurn, sliceNewEvents, resolveRoute, captureCa
 import { createApi, json } from './lib/api.js'
 
 export const name = 'memory-eternal'
-export const inject = ['systemPrompt', 'settings']
+// 声明本插件真正读取的服务：0.2.x 上 `ctx.get(name)` 只对已声明的服务生效，
+// 未声明的会返回 undefined —— 而下面用 `ctx.get('tools' | 'webServer' | 'llm')`
+// 时只做了 undefined 判断，结果是「工具没注册、同源 API 没挂上」且不报错。
+export const inject = ['systemPrompt', 'settings', 'tools', 'webServer', 'llm']
 
 export const Config = z.object({
   enabled: z.boolean().default(true),
