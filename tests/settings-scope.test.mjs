@@ -2,9 +2,12 @@
 // 旧宿主（settings.register）/ 新宿主（SettingsForms.mutate）/ 无写入口三种形态。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { resolveSettingsScope } from '../lib/settings-scope.js'
+import { resolveSettingsScope, isVolatileRef, plainConfig } from '../lib/settings-scope.js'
 
 const schema = { dict: { autoCapture: {}, captureDebug: {} } }
+
+/** 造一个和宿主 volatile 引用同形的对象：写句柄用全局注册 symbol 做键。 */
+const ref = (value) => ({ get: () => value, [Symbol.for('cosmokit.volatile.write')]: () => {} })
 
 test('legacy host: registers a scope and reads through it', () => {
   const calls = []
@@ -87,4 +90,38 @@ test('no settings service: no update, so callers keep the honest 501', () => {
     assert.equal(typeof scope.update, 'undefined', `settings=${JSON.stringify(settings)} 不该暴露写入口`)
     assert.equal(scope.get().auditMode, 'none')
   }
+})
+
+test('volatile refs are unwrapped before the plugin reads them', () => {
+  // 这是线上事故的回归：schema 标了 .volatile() 后，宿主交给插件的 config 里
+  // 那些字段是引用对象；不还原就 `cfg.vaultDir.trim()` → TypeError，插件整个 fiber 起不来。
+  assert.equal(isVolatileRef(ref('x')), true)
+  assert.equal(isVolatileRef({ get: () => 'x' }), false, '普通对象不算引用')
+  assert.equal(isVolatileRef('x'), false)
+  assert.equal(isVolatileRef(null), false)
+
+  // 逐层还原：引用、数组内引用、嵌套对象内引用
+  const raw = {
+    vaultDir: ref('E:/vault'),
+    captureDebug: ref(true),
+    vaultProfiles: [ref({ name: 'a', path: 'E:/a' }), { name: ref('b'), path: 'E:/b' }],
+    auditMode: 'none',
+    nested: { deep: ref(7) },
+  }
+  const plain = plainConfig(raw)
+  assert.equal(plain.vaultDir, 'E:/vault')
+  assert.equal(plain.captureDebug, true)
+  assert.deepEqual(plain.vaultProfiles, [{ name: 'a', path: 'E:/a' }, { name: 'b', path: 'E:/b' }])
+  assert.equal(plain.auditMode, 'none')
+  assert.equal(plain.nested.deep, 7)
+  // 结果必须能直接 JSON.stringify（写共享配置文件要用）
+  assert.equal(JSON.parse(JSON.stringify(plain)).vaultDir, 'E:/vault')
+
+  // entry 模式与 scope 模式都要还原
+  const entry = resolveSettingsScope({ mutate: async () => {} }, 'memory-eternal', schema, { vaultDir: ref('E:/v') })
+  assert.equal(entry.get().vaultDir, 'E:/v')
+  const legacy = resolveSettingsScope({
+    register: () => ({ get: () => ({ vaultDir: ref('E:/legacy') }), watch: () => () => {}, describe: () => [] }),
+  }, 'memory-eternal', schema, {})
+  assert.equal(legacy.get().vaultDir, 'E:/legacy')
 })

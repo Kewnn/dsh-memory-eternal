@@ -165,6 +165,11 @@ dsh-memory watchdog [--port 7799]    # 看门狗保活 web（独立进程）
 > 保存后立即生效；`autoMcpSetup`、`autoWeb`、`autoWebMode`、`webPort`、
 > `webCheckIntervalMs`、`webMaxRestart`、`watchdogAutoSpawn` 只在启动阶段读一次，
 > 宿主会拒写并提示改 profile 的 `cordis.patch.yml` 行 config 再重启。
+>
+> ⚠️ **标了 volatile 的字段，宿主交给插件的是「引用对象」而不是值**（要 `.get()` 才是当前值，
+> 等价于宿主内部的 `plainConfig()`）。所以插件读配置前先做一层还原——少了这层，
+> schema 里一标 volatile，启动就 `TypeError: cfg.vaultDir.trim is not a function`，
+> 整个 fiber 挂掉、路由全部没挂上（自 0.7.4 起修）。
 
 > **沉淀为什么没出卡？** 自动沉淀在每轮结束时按顺序过四道关：开关 → 本轮文本长度
 > （`捕获最小长度`，计的是该轮用户+助手文本）→ 日配额 → 模型路由（`resolveRoute`）。
