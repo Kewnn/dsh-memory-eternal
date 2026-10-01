@@ -27,7 +27,7 @@ import z from '@deepseek-ai/schemastery'
 import { buildConfig, partitionPatch, BOOT_ONLY_FIELDS } from './lib/config-schema.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { ensureVault, search, generateDailyBrief } from './lib/vault.js'
-import { summarizeTurn, extractLastTurn, sliceNewEvents, resolveRoute, resolveSessionEvents, captureCard, captureUpdate, pickNeighbors } from './lib/capture.js'
+import { summarizeTurn, extractLastTurn, sliceNewEvents, resolveRoute, resolveSessionEvents, trimTurnText, captureCard, captureUpdate, pickNeighbors } from './lib/capture.js'
 import { createApi, json } from './lib/api.js'
 import { resolveSettingsScope } from './lib/settings-scope.js'
 
@@ -131,7 +131,9 @@ export function apply(ctx, config) {
       const dlog = (msg) => { if (debug) console.error(`[memory-eternal] capture: ${msg}`) }
       if (!cfg.enabled || !cfg.autoCapture) return
       const llm = ctx.get('llm')
-      const text = extractLastTurn(events)
+      const trimmed = trimTurnText(extractLastTurn(events))
+      const text = trimmed.text
+      if (trimmed.trimmed) dlog(`turn text trimmed to the newest ${text.length} chars (TURN_TEXT_MAX)`)
       const minChars = cfg.captureMinChars ?? 200
       if (text.length < minChars) { dlog(`skipped: turn text ${text.length} chars < captureMinChars ${minChars}`); return }
       // 日配额：防止一次大扫荡烧光 token。
@@ -232,10 +234,18 @@ export function apply(ctx, config) {
       return
     }
     const sessionId = agent?.session?.id ?? agent?.id ?? 'unknown'
+    const last = events[events.length - 1]
+    const latestSeq = typeof last?.seq === 'number' ? last.seq : 0
+    // 插件是在会话进行中被加载/重启的：第一次看到的是一整段历史，直接沉淀会把整段会话
+    // 塞给模型（贵且产出垃圾卡）。首次只登记水位线、跳过存量，从下一轮开始增量沉淀。
+    if (!lastSeqs.has(sessionId)) {
+      lastSeqs.set(sessionId, latestSeq)
+      hookLog(`first sight of session ${sessionId}: skipped ${events.length} historical events, capturing from the next turn`)
+      return
+    }
     const lastSeq = lastSeqs.get(sessionId) ?? 0
     scheduleCapture(agent, events, lastSeq)
-    const last = events[events.length - 1]
-    lastSeqs.set(sessionId, typeof last?.seq === 'number' ? last.seq : lastSeq)
+    if (latestSeq > lastSeq) lastSeqs.set(sessionId, latestSeq)
   })
 
   // -- 2. 自动召回：systemPrompt 分段 + memory_recall 工具 -----------------

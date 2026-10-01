@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { ensureVault, listCards, readCard } from '../lib/vault.js'
-import { summarizeTurn, extractLastTurn, sliceNewEvents, parseCaptureJson, captureCard, captureUpdate, makeDedupChecker, pickNeighbors, DEDUP_THRESHOLD, compressExcerpt, resolveRoute, resolveSessionEvents } from '../lib/capture.js'
+import { summarizeTurn, extractLastTurn, sliceNewEvents, parseCaptureJson, captureCard, captureUpdate, makeDedupChecker, pickNeighbors, DEDUP_THRESHOLD, compressExcerpt, resolveRoute, resolveSessionEvents, trimTurnText, TURN_TEXT_MAX } from '../lib/capture.js'
 
 const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-cap-'))
 const root = path.join(tmpRoot, 'vault')
@@ -245,4 +245,21 @@ test('resolveSessionEvents: 0.2.x 走 session.snapshotEvents()，老宿主退回
   // sliceNewEvents 取「seq > lastSeq」：起始 lastSeq=0 时 seq 0 的那条（会话种子）本来就会被跳过
   assert.equal(sliceNewEvents(events, -1).length, 2)
   assert.equal(sliceNewEvents(events, 0).length, 1)
+})
+
+test('trimTurnText: 超长轮次保留最新部分，避免把整段会话喂给模型', () => {
+  const short = 'abc'
+  assert.deepEqual(trimTurnText(short), { text: 'abc', trimmed: false })
+  assert.equal(TURN_TEXT_MAX, 20000)
+
+  const long = 'x'.repeat(TURN_TEXT_MAX + 500) + '尾部标记'
+  const out = trimTurnText(long)
+  assert.equal(out.trimmed, true)
+  assert.equal(out.text.length, TURN_TEXT_MAX)
+  assert.ok(out.text.endsWith('尾部标记'), '保留的是末尾（最新内容）')
+
+  // 自定义上限 & 边界
+  assert.deepEqual(trimTurnText('0123456789', 4), { text: '6789', trimmed: true })
+  assert.deepEqual(trimTurnText('', 4), { text: '', trimmed: false })
+  assert.deepEqual(trimTurnText(undefined), { text: '', trimmed: false })
 })
