@@ -12,58 +12,62 @@ try {
 
 const { buildConfig, BOOT_ONLY_FIELDS, partitionPatch } = await import('../lib/config-schema.js')
 
-test('partitionPatch: boot-only fields are split out so the rest can still save', () => {
-  // 设置页常把整份表单一起提交；宿主对每个 op 逐个校验，混进启动期字段会让整次保存失败。
+test('partitionPatch: everything is written, boot-only fields are flagged for restart', () => {
+  // 设置页把整份表单一起提交（含端口 / 保活 / 看门狗）：两类字段都写下去，
+  // 但要把「需重启才生效」的那几个点名回给用户。
   const Config = { dict: { captureDebug: {}, captureMinChars: {}, autoWeb: {}, webPort: {}, watchdogAutoSpawn: {} } }
-  const { live, bootOnly, unknown } = partitionPatch(Config, {
+  const { live, needsRestart, unknown } = partitionPatch(Config, {
     captureDebug: true,
     captureMinChars: 120,
     autoWeb: false,
     webPort: 8123,
     notAField: 1,
   })
-  assert.deepEqual(live, { captureDebug: true, captureMinChars: 120 })
-  assert.deepEqual(bootOnly.sort(), ['autoWeb', 'webPort'])
+  assert.deepEqual(live, { captureDebug: true, captureMinChars: 120, autoWeb: false, webPort: 8123 })
+  assert.deepEqual(needsRestart.sort(), ['autoWeb', 'webPort'])
   assert.deepEqual(unknown, ['notAField'])
 
-  // 只动启动期字段 → 没有可热改项，调用方应当直接给「改 patch 行 + 重启」的提示
+  // 只动启动期字段 → 依然能存下来，只是提示需重启（不再整次失败）
   const onlyBoot = partitionPatch(Config, { webPort: 8123 })
-  assert.deepEqual(onlyBoot.live, {})
-  assert.deepEqual(onlyBoot.bootOnly, ['webPort'])
+  assert.deepEqual(onlyBoot.live, { webPort: 8123 })
+  assert.deepEqual(onlyBoot.needsRestart, ['webPort'])
 
   // 空 patch / undefined 不该炸
   assert.deepEqual(partitionPatch(Config, undefined).live, {})
-  assert.deepEqual(partitionPatch(undefined, { a: 1 }).bootOnly, [])
+  assert.deepEqual(partitionPatch(undefined, { a: 1 }).needsRestart, [])
   assert.deepEqual(partitionPatch(undefined, { a: 1 }).unknown, ['a'])
 })
 
-test('config schema: runtime fields are volatile, boot-only fields are not', { skip: z ? false : '@deepseek-ai/schemastery 未安装' }, () => {
+test('config schema: every field is writable, boot-only ones are only flagged', { skip: z ? false : '@deepseek-ai/schemastery 未安装' }, () => {
   const Config = buildConfig(z)
   const dict = Config.dict ?? {}
   const keys = Object.keys(dict)
   assert.ok(keys.length > 30, `字段数异常：${keys.length}`)
 
-  // 宿主 0.2.x：至少得有一个 volatile 字段，否则设置页直写会抛
-  // `Plugin entry "memory-eternal" has no volatile fields`。
-  const volatileKeys = keys.filter((k) => dict[k]?.meta?.volatile === true)
-  assert.ok(volatileKeys.length > 0, '必须声明可热改字段')
+  // 宿主 0.2.x 只接受 volatile 字段，且设置页是整份表单一起提交：
+  // 只要有字段没标，整次保存就会报 `is not volatile`（线上实测）。
+  const notVolatile = keys.filter((k) => dict[k]?.meta?.volatile !== true)
+  assert.deepEqual(notVolatile, [], '所有字段都要标 volatile，否则整份表单保存会被宿主整批驳回')
 
-  // 启动期字段必须**不**是 volatile：它们只在 apply 阶段读一次，热改会骗人。
-  for (const k of BOOT_ONLY_FIELDS) {
-    assert.ok(keys.includes(k), `启动期字段 ${k} 不存在于 schema`)
-    assert.notEqual(dict[k]?.meta?.volatile, true, `${k} 是启动期字段，不该标 volatile`)
-  }
+  // 「改了要重启」的字段由 BOOT_ONLY_FIELDS 单独标注（与能不能写解耦）。
+  for (const k of BOOT_ONLY_FIELDS) assert.ok(keys.includes(k), `启动期字段 ${k} 不存在于 schema`)
 
   // 沉淀/召回相关的高频旋钮必须可热改（这正是设置页主要用来调的东西）。
-  for (const k of ['enabled', 'autoCapture', 'autoRecall', 'captureMinChars', 'captureDebug', 'captureFallbackToRaw', 'distillEnabled', 'dedupThreshold', 'maxCardsPerDay', 'recallLimit', 'auditMode']) {
+  for (const k of ['enabled', 'autoCapture', 'autoRecall', 'captureMinChars', 'captureDebug', 'captureFallbackToRaw', 'distillEnabled', 'dedupThreshold', 'maxCardsPerDay', 'recallLimit', 'auditMode', 'webPort']) {
     assert.equal(dict[k]?.meta?.volatile, true, `${k} 应可热改`)
   }
 
   // 每个 volatile 字段都得落在固定对象路径上（宿主会拒绝 dict/动态键下的 volatile）。
-  for (const k of volatileKeys) {
+  for (const k of keys) {
     const node = dict[k]
     assert.notEqual(node?.meta?.dict, true, `${k} 若是 dict 则不能标 volatile（宿主会抛 volatile fields require a fixed object path）`)
   }
+
+  // 分区语义：全部可写；启动期字段额外进 needsRestart；未知键单独报告
+  const part = partitionPatch(Config, { captureDebug: true, webPort: 8123, vaultDir: 'E:/v', nope: 1 })
+  assert.deepEqual(Object.keys(part.live).sort(), ['captureDebug', 'vaultDir', 'webPort'])
+  assert.deepEqual(part.needsRestart, ['webPort'])
+  assert.deepEqual(part.unknown, ['nope'])
 })
 
 test('config schema: defaults survive the volatile wrapper', { skip: z ? false : '@deepseek-ai/schemastery 未安装' }, () => {

@@ -404,14 +404,10 @@ export function apply(ctx, config) {
               const patch = body.patch ?? {}
               const expectedRevision = Number.isInteger(body.expectedRevision) ? body.expectedRevision : undefined
               // 仅允许写入 Config 中声明过的键（白名单，防注入）。schemastery 用 .dict 存 object schema 字段表。
-              // 同时把「启动期字段」挑出来：宿主对每个 op 逐个校验，混进一个启动期字段会让整次保存失败，
-              // 连本该热改的字段也一起白改（设置页常整份表单提交）。
-              const { live: clean, bootOnly, unknown } = partitionPatch(Config, patch)
-              const bootOnlyError = bootOnly.length > 0
-                ? `「${bootOnly.join('、')}」只在插件启动时读一次，不能在运行中修改；请改 profile 的 cordis.patch.yml 里 memory-eternal 这一行的 config 再重启 DSH。`
-                : undefined
+              // 同时分辨出「启动期字段」：它们同样能写下来（两类字段都标了 volatile），
+              // 但只有重启 DSH 后由 apply 重新读取才生效 —— 回复里点名说明，不假装立刻生效。
+              const { live: clean, needsRestart, unknown } = partitionPatch(Config, patch)
               if (Object.keys(clean).length === 0) {
-                if (bootOnly.length > 0) return json(res, 400, { ok: false, error: bootOnlyError, needsRestart: bootOnly })
                 if (unknown.length > 0) return json(res, 400, { ok: false, error: `未知字段：${unknown.join('、')}` })
                 return json(res, 400, { ok: false, error: '无可写入字段' })
               }
@@ -423,18 +419,21 @@ export function apply(ctx, config) {
                   return json(res, 200, {
                     ok: true,
                     applied: Object.keys(clean),
-                    needsRestart: bootOnly,
-                    note: bootOnly.length > 0
-                      ? `已保存（立即生效）。另有 ${bootOnly.join('、')} 属于启动期字段，本次未改动，需要时请改 patch 行再重启 DSH。`
+                    needsRestart,
+                    note: needsRestart.length > 0
+                      ? `已保存。其中 ${needsRestart.join('、')} 需要重启 DSH 才生效（其余立即生效）。`
                       : '已保存，立即生效',
                   })
                 } catch (e) {
                   const message = String(e?.message || e)
                   if (e && e.code === 'SETTINGS_CONFLICT') return json(res, 409, { ok: false, error: '配置已被外部修改，请刷新后重试（revision conflict）' })
-                  // 宿主只接受 volatile 字段：命中说明这次真的碰上了启动期字段
-                  // （只能落到 profile 的 patch 行再重启；见 lib/config-schema.js）。
+                  // 宿主只接受 volatile 字段（正常路径不该走到这里：Config 里两类字段都标了）。
                   if (/has no volatile fields|is not volatile/.test(message)) {
-                    return json(res, 400, { ok: false, error: bootOnlyError ?? '该字段只在插件启动时读取，不能在运行中修改；请改 profile 的 cordis.patch.yml 里这一行的 config 再重启 DSH。', detail: message })
+                    return json(res, 400, {
+                      ok: false,
+                      error: '当前宿主不接受这个字段的热写；请改 profile 的 cordis.patch.yml 里 memory-eternal 这一行的 config 再重启 DSH。',
+                      detail: message,
+                    })
                   }
                   return json(res, 500, { ok: false, error: message })
                 }
