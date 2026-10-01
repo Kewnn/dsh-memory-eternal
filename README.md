@@ -159,9 +159,12 @@ dsh-memory watchdog [--port 7799]    # 看门狗保活 web（独立进程）
 
 > **设置页能不能直接改配置？** 看宿主。0.1.x 时代插件持有可写的设置段，页面直接写；
 > 0.2.x 移除了该 API，插件改为把「保存」翻译成宿主的 `SettingsForms.mutate(ns, ops)`
-> 持久化（自 0.7.2 起）。若宿主没合成 settings 服务，页面会**只读**并如实提示
-> 「当前环境不支持写配置」——这时改配置请编辑 profile 的 `cordis.patch.yml` 里
-> `- id: memory-eternal` 那一行的 `config:`，然后重启。
+> 持久化（自 0.7.2 起）。**并且宿主只接受标了 volatile 的字段**，否则报
+> `Plugin entry "memory-eternal" has no volatile fields`。所以自 0.7.3 起按「运行时是否
+> 每次重新读」划线：沉淀 / 召回 / 去重 / 审核 / 回收 / 库位置这些字段标了 volatile，
+> 保存后立即生效；`autoMcpSetup`、`autoWeb`、`autoWebMode`、`webPort`、
+> `webCheckIntervalMs`、`webMaxRestart`、`watchdogAutoSpawn` 只在启动阶段读一次，
+> 宿主会拒写并提示改 profile 的 `cordis.patch.yml` 行 config 再重启。
 
 > **沉淀为什么没出卡？** 自动沉淀在每轮结束时按顺序过四道关：开关 → 本轮文本长度
 > （`捕获最小长度`，计的是该轮用户+助手文本）→ 日配额 → 模型路由（`resolveRoute`）。
