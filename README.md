@@ -182,6 +182,15 @@ dsh-memory watchdog [--port 7799]    # 看门狗保活 web（独立进程）
 > 前两道被卡住是设计使然；第四道以前是**静默**返回——宿主没给可用路由时既没卡、也没
 > 任何提示。现在打开「沉淀诊断日志」就能看到具体是哪一道，或者直接打开
 > 「无路由时存原文卡」让内容先落盘。
+>
+> 🐞 **0.2.x 上还有一道更隐蔽的坑（自 0.7.7 起修）**：会话事件在
+> `agent.session.snapshotEvents()` 上，而 `agent.session` **没有** `events` 字段
+> （宿主 `packages/core/session/src/index.ts:649`）。老代码只认 `.events` →
+> 钩子在 `Array.isArray` 那一步**静默 return**：没卡、没报错，连 `captureDebug`
+> 的日志都不会出现（因为连 `runCapture` 都没进）。现在统一走
+> `resolveSessionEvents()` 兼容读取（快照方法 → 旧字段 → 空数组），
+> 钩子层自己也会写诊断：控制台 + `$DSH_HOME/memory-eternal-capture.log`。
+
 
 ### 三、服务怎么跑
 

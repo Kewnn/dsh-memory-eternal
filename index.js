@@ -14,7 +14,7 @@
 // 存储全部落在本地 Markdown Vault（默认 $DSH_HOME/memory-vault），不依赖
 // 外部数据库；卡是普通 .md 文件，可手动编辑、可 git 管理。
 
-import { promises as fs, readFileSync } from 'node:fs'
+import { promises as fs, readFileSync, appendFileSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { spawn } from 'node:child_process'
@@ -27,7 +27,7 @@ import z from '@deepseek-ai/schemastery'
 import { buildConfig, partitionPatch, BOOT_ONLY_FIELDS } from './lib/config-schema.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { ensureVault, search, generateDailyBrief } from './lib/vault.js'
-import { summarizeTurn, extractLastTurn, sliceNewEvents, resolveRoute, captureCard, captureUpdate, pickNeighbors } from './lib/capture.js'
+import { summarizeTurn, extractLastTurn, sliceNewEvents, resolveRoute, resolveSessionEvents, captureCard, captureUpdate, pickNeighbors } from './lib/capture.js'
 import { createApi, json } from './lib/api.js'
 import { resolveSettingsScope } from './lib/settings-scope.js'
 
@@ -211,13 +211,31 @@ export function apply(ctx, config) {
   }
 
   const lastSeqs = new Map() // sessionId -> last processed seq
+  // 钩子层诊断：这一层出错时 runCapture 根本不会跑，所以必须在这里也能出声。
+  // captureDebug 打开时同时写控制台与 $DSH_HOME/memory-eternal-capture.log。
+  const hookLog = (msg) => {
+    try {
+      const cfg = settings.get() ?? {}
+      if (cfg.captureDebug !== true) return
+      const line = `${new Date().toISOString()} ${msg}`
+      console.error(`[memory-eternal] capture: ${msg}`)
+      try {
+        const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
+        appendFileSync(path.join(home, 'memory-eternal-capture.log'), line + '\n')
+      } catch { /* 落盘失败不影响主流程 */ }
+    } catch { /* 诊断本身绝不抛 */ }
+  }
   ctx.on('agent/turn-stopping', ({ agent }) => {
-    const events = agent?.session?.events
-    if (!Array.isArray(events)) return
+    const events = resolveSessionEvents(agent)
+    if (events.length === 0) {
+      hookLog('skipped: agent.session 没有可读事件（0.2.x 需要 session.snapshotEvents()）')
+      return
+    }
     const sessionId = agent?.session?.id ?? agent?.id ?? 'unknown'
     const lastSeq = lastSeqs.get(sessionId) ?? 0
     scheduleCapture(agent, events, lastSeq)
-    lastSeqs.set(sessionId, events.length ? events[events.length - 1].seq : lastSeq)
+    const last = events[events.length - 1]
+    lastSeqs.set(sessionId, typeof last?.seq === 'number' ? last.seq : lastSeq)
   })
 
   // -- 2. 自动召回：systemPrompt 分段 + memory_recall 工具 -----------------
