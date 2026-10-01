@@ -24,7 +24,7 @@ const PACKAGE_ROOT = path.resolve(path.dirname(__filename))
 // 插件版本号（供「记忆配置」页面展示）
 const versionRef = (() => { try { const p = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8')); return p.version } catch { return '' } })()
 import z from '@deepseek-ai/schemastery'
-import { buildConfig } from './lib/config-schema.js'
+import { buildConfig, partitionPatch, BOOT_ONLY_FIELDS } from './lib/config-schema.js'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { ensureVault, search, generateDailyBrief } from './lib/vault.js'
 import { summarizeTurn, extractLastTurn, sliceNewEvents, resolveRoute, captureCard, captureUpdate, pickNeighbors } from './lib/capture.js'
@@ -394,7 +394,7 @@ export function apply(ctx, config) {
                 vaultDir: vaultDir(),
                 version: versionRef,
               }
-              return json(res, 200, { ok: true, config: safe, revision: me?.revision ?? 0, writable: true, readonly: false, schema: me?.schema ?? null, dsh: dshInfo, version: versionRef })
+              return json(res, 200, { ok: true, config: safe, revision: me?.revision ?? 0, writable: true, readonly: false, schema: me?.schema ?? null, bootOnly: BOOT_ONLY_FIELDS, dsh: dshInfo, version: versionRef })
             }
             if (method === 'POST') {
               let raw = ''
@@ -404,27 +404,37 @@ export function apply(ctx, config) {
               const patch = body.patch ?? {}
               const expectedRevision = Number.isInteger(body.expectedRevision) ? body.expectedRevision : undefined
               // 仅允许写入 Config 中声明过的键（白名单，防注入）。schemastery 用 .dict 存 object schema 字段表。
-              const allowed = new Set(Object.keys(Config.dict || {}))
-              const clean = {}
-              for (const k of Object.keys(patch)) { if (allowed.has(k)) clean[k] = patch[k] }
-              if (Object.keys(clean).length === 0) return json(res, 400, { ok: false, error: '无可写入字段' })
+              // 同时把「启动期字段」挑出来：宿主对每个 op 逐个校验，混进一个启动期字段会让整次保存失败，
+              // 连本该热改的字段也一起白改（设置页常整份表单提交）。
+              const { live: clean, bootOnly, unknown } = partitionPatch(Config, patch)
+              const bootOnlyError = bootOnly.length > 0
+                ? `「${bootOnly.join('、')}」只在插件启动时读一次，不能在运行中修改；请改 profile 的 cordis.patch.yml 里 memory-eternal 这一行的 config 再重启 DSH。`
+                : undefined
+              if (Object.keys(clean).length === 0) {
+                if (bootOnly.length > 0) return json(res, 400, { ok: false, error: bootOnlyError, needsRestart: bootOnly })
+                if (unknown.length > 0) return json(res, 400, { ok: false, error: `未知字段：${unknown.join('、')}` })
+                return json(res, 400, { ok: false, error: '无可写入字段' })
+              }
               if (typeof settings.update === 'function') {
                 try {
                   await settings.update(clean)
                   // 把完整配置写入共享文件，让独立 web / MCP hook 与 DSH 设置同步（不同步修复）
                   syncConfigFile()
-                  return json(res, 200, { ok: true, applied: Object.keys(clean), note: '已保存。autoWebMode/watchdogAutoSpawn 等需重启 DSH 生效' })
+                  return json(res, 200, {
+                    ok: true,
+                    applied: Object.keys(clean),
+                    needsRestart: bootOnly,
+                    note: bootOnly.length > 0
+                      ? `已保存（立即生效）。另有 ${bootOnly.join('、')} 属于启动期字段，本次未改动，需要时请改 patch 行再重启 DSH。`
+                      : '已保存，立即生效',
+                  })
                 } catch (e) {
                   const message = String(e?.message || e)
                   if (e && e.code === 'SETTINGS_CONFLICT') return json(res, 409, { ok: false, error: '配置已被外部修改，请刷新后重试（revision conflict）' })
-                  // 宿主只接受 volatile 字段：命中说明用户改的是「启动期字段」，
-                  // 这类字段必须落到 profile 的 patch 行再重启（见 lib/config-schema.js）。
+                  // 宿主只接受 volatile 字段：命中说明这次真的碰上了启动期字段
+                  // （只能落到 profile 的 patch 行再重启；见 lib/config-schema.js）。
                   if (/has no volatile fields|is not volatile/.test(message)) {
-                    return json(res, 400, {
-                      ok: false,
-                      error: '该字段只在插件启动时读取，不能在运行中修改；请改 profile 的 cordis.patch.yml 里这一行的 config 再重启 DSH（可热改的字段：沉淀/召回/去重/审核/回收相关）。',
-                      detail: message,
-                    })
+                    return json(res, 400, { ok: false, error: bootOnlyError ?? '该字段只在插件启动时读取，不能在运行中修改；请改 profile 的 cordis.patch.yml 里这一行的 config 再重启 DSH。', detail: message })
                   }
                   return json(res, 500, { ok: false, error: message })
                 }

@@ -10,7 +10,32 @@ try {
   z = undefined
 }
 
-const { buildConfig, BOOT_ONLY_FIELDS } = await import('../lib/config-schema.js')
+const { buildConfig, BOOT_ONLY_FIELDS, partitionPatch } = await import('../lib/config-schema.js')
+
+test('partitionPatch: boot-only fields are split out so the rest can still save', () => {
+  // 设置页常把整份表单一起提交；宿主对每个 op 逐个校验，混进启动期字段会让整次保存失败。
+  const Config = { dict: { captureDebug: {}, captureMinChars: {}, autoWeb: {}, webPort: {}, watchdogAutoSpawn: {} } }
+  const { live, bootOnly, unknown } = partitionPatch(Config, {
+    captureDebug: true,
+    captureMinChars: 120,
+    autoWeb: false,
+    webPort: 8123,
+    notAField: 1,
+  })
+  assert.deepEqual(live, { captureDebug: true, captureMinChars: 120 })
+  assert.deepEqual(bootOnly.sort(), ['autoWeb', 'webPort'])
+  assert.deepEqual(unknown, ['notAField'])
+
+  // 只动启动期字段 → 没有可热改项，调用方应当直接给「改 patch 行 + 重启」的提示
+  const onlyBoot = partitionPatch(Config, { webPort: 8123 })
+  assert.deepEqual(onlyBoot.live, {})
+  assert.deepEqual(onlyBoot.bootOnly, ['webPort'])
+
+  // 空 patch / undefined 不该炸
+  assert.deepEqual(partitionPatch(Config, undefined).live, {})
+  assert.deepEqual(partitionPatch(undefined, { a: 1 }).bootOnly, [])
+  assert.deepEqual(partitionPatch(undefined, { a: 1 }).unknown, ['a'])
+})
 
 test('config schema: runtime fields are volatile, boot-only fields are not', { skip: z ? false : '@deepseek-ai/schemastery 未安装' }, () => {
   const Config = buildConfig(z)
